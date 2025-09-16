@@ -31,10 +31,12 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Setup FFmpeg
-      uses: FedericoCarboni/setup-ffmpeg@v2
-      with:
-        ffmpeg-version: 6.1
+    - name: Install FFmpeg
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+        echo "FFmpeg version:"
+        ffmpeg -version
 
     - name: Create output directory
       run: mkdir -p output
@@ -59,7 +61,7 @@ jobs:
                -c copy \
                -bsf:a aac_adtstoasc \
                "$OUTPUT_FILE" \
-               -y || exit 1
+               -y
         
         # Verificar se o arquivo foi criado
         if [ ! -f "$OUTPUT_FILE" ]; then
