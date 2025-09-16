@@ -1,0 +1,90 @@
+name: HLS Download and Encode
+
+on:
+  workflow_dispatch:
+    inputs:
+      hls_url:
+        description: 'URL do stream HLS'
+        required: true
+        type: string
+      output_format:
+        description: 'Formato de saída (mp4, mkv, avi, mov)'
+        required: false
+        default: 'mp4'
+        type: choice
+        options:
+          - mp4
+          - mkv
+          - avi
+          - mov
+      output_filename:
+        description: 'Nome do arquivo de saída (sem extensão)'
+        required: false
+        default: 'output'
+        type: string
+
+jobs:
+  download-and-encode:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup FFmpeg
+      uses: FedericoCarboni/setup-ffmpeg@v2
+      with:
+        ffmpeg-version: 6.1
+
+    - name: Create output directory
+      run: mkdir -p output
+
+    - name: Download and encode HLS stream
+      run: |
+        # Validar URL
+        if [[ -z "${{ github.event.inputs.hls_url }}" ]]; then
+          echo "❌ URL do HLS não fornecida"
+          exit 1
+        fi
+
+        # Definir nome do arquivo de saída
+        OUTPUT_FILE="output/${{ github.event.inputs.output_filename }}.${{ github.event.inputs.output_format }}"
+        
+        echo "📥 Baixando e convertendo stream HLS..."
+        echo "🔗 URL: ${{ github.event.inputs.hls_url }}"
+        echo "💾 Saída: $OUTPUT_FILE"
+        
+        # Baixar e converter o stream HLS
+        ffmpeg -i "${{ github.event.inputs.hls_url }}" \
+               -c copy \
+               -bsf:a aac_adtstoasc \
+               "$OUTPUT_FILE" \
+               -y || exit 1
+        
+        # Verificar se o arquivo foi criado
+        if [ ! -f "$OUTPUT_FILE" ]; then
+          echo "❌ Falha ao criar o arquivo de saída"
+          exit 1
+        fi
+        
+        echo "✅ Conversão concluída com sucesso!"
+        echo "📊 Tamanho do arquivo: $(du -h "$OUTPUT_FILE" | cut -f1)"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: converted-video
+        path: output/
+        retention-days: 7
+
+    - name: Show download instructions
+      run: |
+        echo "🎉 Processamento concluído!"
+        echo ""
+        echo "📥 Para baixar o arquivo:"
+        echo "1. Vá para a aba 'Actions'"
+        echo "2. Clique nesta execução do workflow"
+        echo "3. Desça até 'Artifacts' e clique em 'converted-video'"
+        echo "4. Baixe o arquivo ZIP e extraia o vídeo convertido"
+        echo ""
+        echo "📁 Arquivo gerado: ${{ github.event.inputs.output_filename }}.${{ github.event.inputs.output_format }}"
