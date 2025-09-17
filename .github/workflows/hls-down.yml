@@ -1,0 +1,96 @@
+name: HLS Download and Encode with Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      hls_url:
+        description: 'URL do stream HLS'
+        required: true
+        type: string
+      output_format:
+        description: 'Formato de saída'
+        required: false
+        default: 'mp4'
+        type: choice
+        options:
+          - mp4
+          - mkv
+          - avi
+          - mov
+      output_filename:
+        description: 'Nome do arquivo de saída'
+        required: false
+        default: 'video-convertido'
+        type: string
+
+jobs:
+  download-and-encode:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install FFmpeg
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
+    - name: Create output directory
+      run: mkdir -p output
+
+    - name: Process HLS stream
+      run: |
+        set -e
+        
+        URL="${{ github.event.inputs.hls_url }}"
+        FORMAT="${{ github.event.inputs.output_format }}"
+        FILENAME="${{ github.event.inputs.output_filename }}"
+        OUTPUT_FILE="output/${FILENAME}.${FORMAT}"
+        
+        echo "Processing HLS stream from: $URL"
+        
+        ffmpeg -i "$URL" -c copy -bsf:a aac_adtstoasc "$OUTPUT_FILE" -y
+        
+        if [ ! -f "$OUTPUT_FILE" ]; then
+          echo "❌ Failed to create output file"
+          exit 1
+        fi
+        
+        FILE_SIZE=$(du -h "$OUTPUT_FILE" | cut -f1)
+        echo "✅ Conversion successful! File size: $FILE_SIZE"
+
+    - name: Upload temporary artifact (2 days retention)
+      uses: actions/upload-artifact@v4
+      with:
+        name: temporary-video-backup
+        path: output/
+        retention-days: 2
+
+    - name: Create GitHub Release with video
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: video-$(date +%Y%m%d-%H%M%S)
+        name: "Vídeo Convertido - $(date '+%d/%m/%Y %H:%M')"
+        body: |
+          ## Arquivo de vídeo convertido
+          
+          **Detalhes:**
+          - Origem: Stream HLS
+          - Formato: ${{ github.event.inputs.output_format }}
+          - Data de geração: $(date '+%d/%m/%Y %H:%M:%S')
+          - Workflow: ${{ github.workflow }} #${{ github.run_id }}
+          
+          **URL original:** ${{ github.event.inputs.hls_url }}
+        files: output/${{ github.event.inputs.output_filename }}.${{ github.event.inputs.output_format }}
+        draft: false
+        prerelease: false
+
+    - name: Display release URL
+      run: |
+        echo "🎉 Release criado com sucesso!"
+        echo "📦 Download disponível em: ${{ steps.create_release.outputs.html_url }}"
+        echo "🔗 URL direta do arquivo: ${{ steps.create_release.outputs.upload_url }}"
