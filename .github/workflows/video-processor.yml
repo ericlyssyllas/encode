@@ -1,0 +1,67 @@
+name: Process Video with Subtitles
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'URL do vídeo'
+        required: true
+      subtitle_url:
+        description: 'URL da legenda'
+        required: true
+      crf_value:
+        description: 'Valor CRF'
+        default: '23'
+
+jobs:
+  process-video:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install FFmpeg
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
+    - name: Download files
+      run: |
+        # Download do vídeo
+        curl -L -o video.file "${{ github.event.inputs.video_url }}"
+        
+        # Download da legenda
+        curl -L -o subtitle.file "${{ github.event.inputs.subtitle_url }}"
+
+    - name: Detect file types
+      id: file-info
+      run: |
+        VIDEO_EXT=$(echo "${{ github.event.inputs.video_url }}" | grep -o '\.[^.]*$' | sed 's/^.//')
+        SUB_EXT=$(echo "${{ github.event.inputs.subtitle_url }}" | grep -o '\.[^.]*$' | sed 's/^.//')
+        echo "video_ext=${VIDEO_EXT:-mp4}" >> $GITHUB_OUTPUT
+        echo "sub_ext=${SUB_EXT:-srt}" >> $GITHUB_OUTPUT
+
+    - name: Rename files with proper extensions
+      run: |
+        mv video.file input_video.${{ steps.file-info.outputs.video_ext }}
+        mv subtitle.file input_subtitle.${{ steps.file-info.outputs.sub_ext }}
+
+    - name: Process video with FFmpeg
+      run: |
+        ffmpeg -i input_video.${{ steps.file-info.outputs.video_ext }} \
+               -c:v libx264 \
+               -crf ${{ github.event.inputs.crf_value }} \
+               -preset medium \
+               -c:a aac \
+               -b:a 192k \
+               -vf "subtitles=input_subtitle.${{ steps.file-info.outputs.sub_ext }}" \
+               -movflags +faststart \
+               output_video.mp4
+
+    - name: Upload result
+      uses: actions/upload-artifact@v4
+      with:
+        name: video-with-subtitles
+        path: output_video.mp4
+        retention-days: 30
