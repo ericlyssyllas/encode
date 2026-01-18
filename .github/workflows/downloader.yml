@@ -155,13 +155,8 @@ jobs:
           ## 📥 Download Automático
           
           **Arquivo:** `${{ steps.prepare.outputs.final_filename }}`
-          
           **Origem:** ${{ github.event.inputs.download_url }}
-          
           **Tamanho:** ${{ steps.prepare.outputs.file_size_mb }} MB (${{ steps.prepare.outputs.file_size }} bytes)
-          
-          **Data:** $(date '+%d/%m/%Y %H:%M:%S')
-          
           **Tag:** ${{ steps.tag.outputs.tag_name }}
           
           ---
