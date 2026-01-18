@@ -136,7 +136,8 @@ jobs:
         echo "final_filename=$FILENAME" >> $GITHUB_OUTPUT
         echo "file_size=$(stat -c%s "$FILENAME")" >> $GITHUB_OUTPUT
 
-    - name: Create release
+    - name: Create GitHub Release
+      id: create_release
       uses: softprops/action-gh-release@v1
       with:
         tag_name: "dl-$(date +%Y%m%d-%H%M%S)"
