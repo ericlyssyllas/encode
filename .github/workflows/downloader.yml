@@ -1,62 +1,171 @@
-name: Simple Download and Release
+name: Universal Download with Google Drive Support
 
 on:
   workflow_dispatch:
     inputs:
       download_url:
-        description: 'URL do arquivo para download'
+        description: 'URL para download (Google Drive ou qualquer outra)'
         required: true
         type: string
-      aria2_options:
-        description: 'Opções do aria2c'
+      output_filename:
+        description: 'Nome personalizado (opcional - deixe vazio para nome original)'
         required: false
         type: string
-        default: '--continue=true --max-tries=0'
+        default: ''
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
-  simple-download:
+  download:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Setup
-      run: sudo apt-get update && sudo apt-get install -y aria2
+    - name: Checkout
+      uses: actions/checkout@v4
 
-    - name: Download with aria2 (preserve original name)
-      id: download
+    - name: Detect URL type
+      id: detect_url
       run: |
-        echo "Baixando: ${{ inputs.download_url }}"
+        URL="${{ inputs.download_url }}"
         
-        # Baixar SEM especificar nome de saída
-        # O aria2c usará o nome do servidor
-        aria2c ${{ inputs.aria2_options }} "${{ inputs.download_url }}"
+        if echo "$URL" | grep -qi "drive.google.com\|docs.google.com"; then
+          echo "is_gdrive=true" >> $GITHUB_OUTPUT
+          echo "🔵 Detectado: Google Drive"
+          
+          # Extrair ID do arquivo
+          if echo "$URL" | grep -q "/d/"; then
+            FILE_ID=$(echo "$URL" | sed 's|.*/d/\([a-zA-Z0-9_-]*\).*|\1|')
+          elif echo "$URL" | grep -q "id="; then
+            FILE_ID=$(echo "$URL" | sed 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/')
+          fi
+          
+          echo "file_id=$FILE_ID" >> $GITHUB_OUTPUT
+          echo "ID do arquivo: $FILE_ID"
+        else
+          echo "is_gdrive=false" >> $GITHUB_OUTPUT
+          echo "🔵 Detectado: URL normal"
+        fi
+
+    - name: Download from Google Drive (se for Google)
+      id: download_gdrive
+      if: steps.detect_url.outputs.is_gdrive == 'true'
+      run: |
+        echo "📥 Baixando do Google Drive..."
         
-        # Encontrar qual arquivo foi baixado
-        # O aria2c geralmente mantém o nome original
-        echo "Arquivos na pasta:"
-        ls -la
+        # Instalar gdown
+        pip install gdown
         
-        # Pegar o arquivo mais recente (provavelmente o que acabou de baixar)
-        FILENAME=$(ls -1t | head -1)
-        
-        # Verificar se é um arquivo (não diretório)
-        if [ ! -f "$FILENAME" ]; then
-          # Tentar encontrar qualquer arquivo
-          FILENAME=$(find . -maxdepth 1 -type f -printf "%f\n" | head -1)
+        # Baixar com gdown
+        if [ -n "${{ inputs.output_filename }}" ] && [ "${{ inputs.output_filename }}" != "" ]; then
+          echo "Usando nome personalizado: ${{ inputs.output_filename }}"
+          gdown "https://drive.google.com/uc?id=${{ steps.detect_url.outputs.file_id }}" -O "${{ inputs.output_filename }}"
+          FILENAME="${{ inputs.output_filename }}"
+        else
+          # gdown vai usar o nome original
+          gdown "https://drive.google.com/uc?id=${{ steps.detect_url.outputs.file_id }}"
+          # Pegar o nome do arquivo baixado
+          FILENAME=$(ls -1t | grep -v '\.py$' | head -1)
         fi
         
-        if [ -z "$FILENAME" ] || [ ! -f "$FILENAME" ]; then
-          echo "ERRO: Nenhum arquivo encontrado após download!"
+        if [ ! -f "$FILENAME" ]; then
+          echo "❌ Falha no download do Google Drive"
+          echo "Tentando método alternativo..."
+          
+          # Método alternativo com wget
+          wget --no-check-certificate \
+            "https://drive.google.com/uc?export=download&id=${{ steps.detect_url.outputs.file_id }}&confirm=t" \
+            -O "$FILENAME" || true
+        fi
+        
+        echo "✅ Download concluído: $FILENAME"
+        echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+
+    - name: Install aria2 for normal URLs
+      if: steps.detect_url.outputs.is_gdrive == 'false'
+      run: sudo apt-get update && sudo apt-get install -y aria2
+
+    - name: Download with aria2 (para URLs normais)
+      id: download_normal
+      if: steps.detect_url.outputs.is_gdrive == 'false'
+      run: |
+        echo "📥 Baixando com aria2c..."
+        
+        # Baixar SEM especificar nome para preservar nome original
+        aria2c \
+          --continue=true \
+          --max-tries=0 \
+          --max-connection-per-server=16 \
+          --split=16 \
+          "${{ inputs.download_url }}"
+        
+        # Encontrar o arquivo mais recentemente modificado
+        FILENAME=$(find . -maxdepth 1 -type f -printf "%T@ %f\n" | sort -nr | head -1 | cut -d' ' -f2-)
+        
+        # Se especificou nome personalizado, renomear
+        if [ -n "${{ inputs.output_filename }}" ] && [ "${{ inputs.output_filename }}" != "" ]; then
+          mv "$FILENAME" "${{ inputs.output_filename }}"
+          FILENAME="${{ inputs.output_filename }}"
+        fi
+        
+        echo "✅ Download concluído: $FILENAME"
+        echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+
+    - name: Determine downloaded file
+      id: final_file
+      run: |
+        if [ "${{ steps.detect_url.outputs.is_gdrive }}" = "true" ]; then
+          FILENAME="${{ steps.download_gdrive.outputs.filename }}"
+        else
+          FILENAME="${{ steps.download_normal.outputs.filename }}"
+        fi
+        
+        # Verificar se o arquivo existe
+        if [ ! -f "$FILENAME" ]; then
+          echo "❌ ERRO: Arquivo não encontrado: $FILENAME"
+          echo "📁 Conteúdo da pasta:"
+          ls -la
           exit 1
         fi
         
-        echo "Arquivo baixado: $FILENAME"
-        echo "Tamanho: $(ls -lh "$FILENAME")"
-        echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+        echo "📊 Informações do arquivo:"
+        echo "Nome: $FILENAME"
+        echo "Tamanho: $(ls -lh "$FILENAME" | awk '{print $5}')"
+        echo "Tipo: $(file -b "$FILENAME" | cut -c1-100)"
+        
+        echo "final_filename=$FILENAME" >> $GITHUB_OUTPUT
+        echo "file_size=$(stat -c%s "$FILENAME")" >> $GITHUB_OUTPUT
 
-    - name: Create release with auto tag
+    - name: Create release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: "file-$(date +%s)"
-        name: "Download: ${{ steps.download.outputs.filename }}"
-        body: "Baixado de: ${{ inputs.download_url }}"
-        files: ${{ steps.download.outputs.filename }}
+        tag_name: "dl-$(date +%Y%m%d-%H%M%S)"
+        name: "${{ steps.final_file.outputs.final_filename }}"
+        body: |
+          ## 📥 Download Automático
+          
+          **Arquivo:** `${{ steps.final_file.outputs.final_filename }}`
+          
+          **Origem:** ${{ inputs.download_url }}
+          
+          **Tamanho:** ${{ steps.final_file.outputs.file_size }} bytes
+          
+          **Data:** $(date '+%d/%m/%Y %H:%M:%S')
+          
+          ---
+          
+          Baixado via GitHub Actions.
+        draft: false
+        prerelease: false
+        files: ${{ steps.final_file.outputs.final_filename }}
+
+    - name: Show result
+      run: |
+        echo "✅✅✅ DOWNLOAD CONCLUÍDO COM SUCESSO! ✅✅✅"
+        echo ""
+        echo "📦 ARQUIVO: ${{ steps.final_file.outputs.final_filename }}"
+        echo "📏 TAMANHO: ${{ steps.final_file.outputs.file_size }} bytes"
+        echo "🔗 FONTE: ${{ inputs.download_url }}"
+        echo "🏷️  RELEASE: dl-$(date +%Y%m%d-%H%M%S)"
+        echo ""
+        echo "✅ O arquivo está disponível na seção Releases deste repositório!"
