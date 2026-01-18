@@ -1,231 +1,119 @@
-name: Universal Download to Release
+name: Download to Release (Fixed)
 
 on:
   workflow_dispatch:
     inputs:
       download_url:
-        description: 'URL para download (Google Drive ou qualquer outra)'
+        description: 'URL para download'
         required: true
         type: string
-      output_filename:
-        description: 'Nome personalizado (opcional)'
-        required: false
-        type: string
-        default: ''
-
-env:
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
-  download-and-release:
+  download:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Setup environment
+    - name: Setup
       run: |
         sudo apt-get update
-        sudo apt-get install -y python3-pip wget curl jq
-        pip3 install gdown
+        sudo apt-get install -y wget curl
+        # Não instalar gdown por padrão
 
-    - name: Detect URL type
-      id: detect_url
+    - name: Download file with original name
+      id: download_file
       run: |
         URL="${{ inputs.download_url }}"
         
-        if echo "$URL" | grep -qi "drive.google.com"; then
-          echo "is_gdrive=true" >> $GITHUB_OUTPUT
-          echo "🔵 Detectado: Google Drive"
-          
-          # Extrair ID do arquivo
-          FILE_ID=$(echo "$URL" | sed -n \
-            -e 's|.*/d/\([a-zA-Z0-9_-]*\).*|\1|p' \
-            -e 's|.*id=\([a-zA-Z0-9_-]*\).*|\1|p' \
-            -e 's|.*/file/d/\([a-zA-Z0-9_-]*\).*|\1|p')
-          
-          echo "file_id=$FILE_ID" >> $GITHUB_OUTPUT
-          echo "ID do arquivo: $FILE_ID"
-        else
-          echo "is_gdrive=false" >> $GITHUB_OUTPUT
-          echo "🔵 Detectado: URL normal"
-        fi
-
-    - name: Download file
-      id: download_file
-      run: |
-        # Função para baixar do Google Drive
-        download_gdrive() {
-          local file_id="$1"
-          local output="$2"
-          
-          echo "📥 Baixando do Google Drive com gdown..."
-          
-          # Tentar com gdown primeiro
-          if [ -n "$output" ] && [ "$output" != "" ]; then
-            gdown "https://drive.google.com/uc?id=$file_id" -O "$output" || return 1
-          else
-            gdown "https://drive.google.com/uc?id=$file_id" || return 1
-            # Pegar o nome do arquivo baixado
-            output=$(ls -1t | grep -v '\.py$\|\.txt$' | head -1)
-          fi
-          
-          echo "$output"
-        }
+        echo "🔗 URL: $URL"
         
-        # Função para baixar URL normal
-        download_normal() {
-          local url="$1"
-          local output="$2"
+        # Primeiro, tentar obter informações do arquivo
+        echo "📡 Obtendo informações..."
+        
+        # Tentar pegar o nome do cabeçalho
+        HEADERS=$(curl -sI "$URL" || curl -sI -L "$URL" || true)
+        FILENAME=$(echo "$HEADERS" | grep -i "content-disposition" | grep -o 'filename="[^"]*"' | cut -d'"' -f2)
+        
+        # Se não conseguir, tentar extrair da URL
+        if [ -z "$FILENAME" ]; then
+          FILENAME=$(basename "$URL" | cut -d'?' -f1)
+          # Validar nome
+          if [ -z "$FILENAME" ] || [ "$FILENAME" = "/" ] || [ "$FILENAME" = "download" ]; then
+            FILENAME="file_$(date +%s)"
+          fi
+        fi
+        
+        echo "📄 Nome do arquivo: $FILENAME"
+        
+        # Baixar o arquivo
+        echo "📥 Baixando..."
+        
+        # Usar wget que é mais confiável
+        if wget --trust-server-names --content-disposition -O "$FILENAME" "$URL"; then
+          echo "✅ Download com wget bem-sucedido"
+        else
+          echo "⚠️ Wget falhou, tentando curl..."
+          curl -L -o "$FILENAME" "$URL"
+        fi
+        
+        # Verificar se o arquivo existe
+        if [ ! -f "$FILENAME" ]; then
+          echo "❌ Tentando método direto do Google Drive..."
           
-          echo "📥 Baixando com wget..."
-          
-          if [ -n "$output" ] && [ "$output" != "" ]; then
-            wget --trust-server-names --content-disposition -O "$output" "$url" || return 1
-          else
-            # Primeiro, tentar obter o nome do cabeçalho
-            filename=$(curl -sI "$url" | grep -i "content-disposition" | grep -o 'filename="[^"]*"' | cut -d'"' -f2)
+          # Tentar detectar Google Drive
+          if echo "$URL" | grep -qi "drive.google.com"; then
+            # Instalar gdown temporariamente
+            pip3 install --quiet gdown
             
-            if [ -z "$filename" ]; then
-              # Extrair da URL
-              filename=$(basename "$url" | cut -d'?' -f1)
-              if [ -z "$filename" ] || [ "$filename" = "/" ]; then
-                filename="downloaded_file_$(date +%s)"
-              fi
+            # Extrair ID
+            FILE_ID=$(echo "$URL" | sed -n \
+              -e 's|.*/d/\([a-zA-Z0-9_-]*\).*|\1|p' \
+              -e 's|.*id=\([a-zA-Z0-9_-]*\).*|\1|p')
+            
+            if [ -n "$FILE_ID" ]; then
+              echo "🌐 Baixando do Google Drive com ID: $FILE_ID"
+              gdown "https://drive.google.com/uc?id=$FILE_ID" -O "$FILENAME"
             fi
-            
-            wget --trust-server-names --content-disposition -O "$filename" "$url" || return 1
-            output="$filename"
           fi
-          
-          echo "$output"
-        }
-        
-        # Executar download baseado no tipo
-        if [ "${{ steps.detect_url.outputs.is_gdrive }}" = "true" ]; then
-          FILENAME=$(download_gdrive "${{ steps.detect_url.outputs.file_id }}" "${{ inputs.output_filename }}")
-        else
-          FILENAME=$(download_normal "${{ inputs.download_url }}" "${{ inputs.output_filename }}")
         fi
         
-        # Verificar se o download foi bem-sucedido
+        # Verificação final
         if [ ! -f "$FILENAME" ]; then
-          echo "❌ Download falhou! Tentando método alternativo..."
-          
-          # Método alternativo com curl
-          if [ -z "${{ inputs.output_filename }}" ] || [ "${{ inputs.output_filename }}" = "" ]; then
-            FILENAME="downloaded_file_$(date +%s)"
-          else
-            FILENAME="${{ inputs.output_filename }}"
-          fi
-          
-          curl -L -o "$FILENAME" "${{ inputs.download_url }}"
-        fi
-        
-        if [ ! -f "$FILENAME" ]; then
-          echo "❌❌❌ ERRO CRÍTICO: Download falhou completamente!"
+          echo "❌❌❌ ERRO: Nenhum arquivo foi baixado!"
+          echo "📁 Conteúdo da pasta:"
+          ls -la
           exit 1
         fi
         
-        # Informações do arquivo
-        FILESIZE=$(stat -c%s "$FILENAME")
-        FILEHASH=$(sha256sum "$FILENAME" | cut -d' ' -f1)
-        
-        echo "✅ Download concluído!"
-        echo "📄 Nome: $FILENAME"
-        echo "📏 Tamanho: $FILESIZE bytes"
-        echo "🔐 SHA256: $FILEHASH"
+        echo "✅✅✅ Download concluído!"
+        echo "📊 Tamanho: $(ls -lh "$FILENAME")"
         
         echo "filename=$FILENAME" >> $GITHUB_OUTPUT
-        echo "filesize=$FILESIZE" >> $GITHUB_OUTPUT
-        echo "filehash=$FILEHASH" >> $GITHUB_OUTPUT
 
-    - name: Generate release tag
-      id: generate_tag
-      run: |
-        # Usar timestamp para tag única
-        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-        RELEASE_TAG="download-$TIMESTAMP"
-        echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
-        echo "🏷️ Tag da release: $RELEASE_TAG"
+    - name: Create Release (Fixed softprops method)
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: "dl-$(date +%s)"
+        name: "${{ steps.download_file.outputs.filename }}"
+        body: |
+          ## 📥 Download Automático
+          
+          **Arquivo:** `${{ steps.download_file.outputs.filename }}`
+          
+          **URL Original:** ${{ inputs.download_url }}
+          
+          **Data:** $(date '+%d/%m/%Y %H:%M:%S')
+          
+          ---
+          
+          Baixado automaticamente via GitHub Actions.
+        files: ${{ steps.download_file.outputs.filename }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Create GitHub Release (API Method)
-      id: create_release
+    - name: Verify release creation
       run: |
-        FILENAME="${{ steps.download_file.outputs.filename }}"
-        RELEASE_TAG="${{ steps.generate_tag.outputs.release_tag }}"
-        
-        echo "🚀 Criando release: $RELEASE_TAG"
-        
-        # Criar a release via API
-        RELEASE_RESPONSE=$(curl -s -X POST \
-          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Accept: application/vnd.github.v3+json" \
-          "https://api.github.com/repos/${{ github.repository }}/releases" \
-          -d "{
-            \"tag_name\": \"$RELEASE_TAG\",
-            \"name\": \"$FILENAME\",
-            \"body\": \"## 📥 Download Automático\\n\\n**Arquivo:** \`$FILENAME\`\\n\\n**URL Original:** ${{ inputs.download_url }}\\n\\n**Tamanho:** ${{ steps.download_file.outputs.filesize }} bytes\\n\\n**SHA256:** \`${{ steps.download_file.outputs.filehash }}\`\\n\\n**Data:** $(date '+%d/%m/%Y %H:%M:%S')\\n\\n---\\n\\nBaixado automaticamente via GitHub Actions.\",
-            \"draft\": false,
-            \"prerelease\": false
-          }")
-        
-        # Extrair upload URL da resposta
-        UPLOAD_URL=$(echo "$RELEASE_RESPONSE" | jq -r '.upload_url' | sed 's/{.*}//')
-        RELEASE_ID=$(echo "$RELEASE_RESPONSE" | jq -r '.id')
-        
-        if [ -z "$UPLOAD_URL" ] || [ "$UPLOAD_URL" = "null" ]; then
-          echo "❌ Erro ao criar release!"
-          echo "Resposta: $RELEASE_RESPONSE"
-          exit 1
-        fi
-        
-        echo "✅ Release criada! ID: $RELEASE_ID"
-        echo "📤 URL para upload: $UPLOAD_URL"
-        
-        echo "upload_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
-        echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
-
-    - name: Upload file to Release
-      run: |
-        FILENAME="${{ steps.download_file.outputs.filename }}"
-        UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
-        
-        echo "📤 Enviando arquivo: $FILENAME"
-        
-        # Detectar MIME type
-        MIME_TYPE=$(file --mime-type -b "$FILENAME")
-        
-        # Fazer upload do arquivo
-        UPLOAD_RESPONSE=$(curl -s \
-          -X POST \
-          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Accept: application/vnd.github.v3+json" \
-          -H "Content-Type: $MIME_TYPE" \
-          --data-binary @"$FILENAME" \
-          "$UPLOAD_URL?name=$FILENAME")
-        
-        UPLOAD_SUCCESS=$(echo "$UPLOAD_RESPONSE" | jq -r '.browser_download_url')
-        
-        if [ -n "$UPLOAD_SUCCESS" ] && [ "$UPLOAD_SUCCESS" != "null" ]; then
-          echo "✅✅✅ ARQUIVO ENVIADO COM SUCESSO!"
-          echo "🔗 Download URL: $UPLOAD_SUCCESS"
-          echo "download_url=$UPLOAD_SUCCESS" >> $GITHUB_ENV
-        else
-          echo "❌ Erro no upload do arquivo!"
-          echo "Resposta: $UPLOAD_RESPONSE"
-          exit 1
-        fi
-
-    - name: Final summary
-      run: |
-        echo "========================================"
-        echo "🎉 DOWNLOAD E RELEASE CONCLUÍDOS!"
-        echo "========================================"
+        echo "✅ Release criada com sucesso!"
         echo "📦 Arquivo: ${{ steps.download_file.outputs.filename }}"
-        echo "🏷️  Release: ${{ steps.generate_tag.outputs.release_tag }}"
-        echo "📏 Tamanho: ${{ steps.download_file.outputs.filesize }} bytes"
-        echo "🔗 Download: ${{ env.download_url }}"
-        echo "🔗 Origem: ${{ inputs.download_url }}"
-        echo "========================================"
+        echo "🏷️  Tag: dl-$(date +%s)"
