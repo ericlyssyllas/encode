@@ -1,32 +1,184 @@
-name: Teste Download Simples
+name: Universal Download with Google Drive Support
 
 on:
   workflow_dispatch:
     inputs:
       download_url:
-        description: 'URL para download'
+        description: 'URL para download (Google Drive ou qualquer outra)'
         required: true
         type: string
+      output_filename:
+        description: 'Nome personalizado (opcional - deixe vazio para nome original)'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
 
 jobs:
-  test:
+  download:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Criar arquivo de teste
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Generate tag name
+      id: tag
       run: |
-        echo "Arquivo de teste gerado em $(date)" > teste.txt
-        echo "Origem: ${{ github.event.inputs.download_url }}" >> teste.txt
-    
-    - name: Criar Release
+        TAG_NAME="dl-$(date +%Y%m%d-%H%M%S)"
+        echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+        echo "Tag gerada: $TAG_NAME"
+
+    - name: Detect URL type
+      id: detect_url
+      run: |
+        URL="${{ github.event.inputs.download_url }}"
+        
+        if echo "$URL" | grep -qi "drive.google.com\|docs.google.com"; then
+          echo "is_gdrive=true" >> $GITHUB_OUTPUT
+          echo "🔵 Detectado: Google Drive"
+          
+          # Extrair ID do arquivo
+          if echo "$URL" | grep -q "/d/"; then
+            FILE_ID=$(echo "$URL" | sed 's|.*/d/\([a-zA-Z0-9_-]*\).*|\1|')
+          elif echo "$URL" | grep -q "id="; then
+            FILE_ID=$(echo "$URL" | sed 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/')
+          else
+            FILE_ID=$(echo "$URL" | sed 's|.*/file/d/\([a-zA-Z0-9_-]*\)/.*|\1|')
+          fi
+          
+          FILE_ID=$(echo "$FILE_ID" | cut -d'/' -f1 | cut -d'?' -f1)
+          echo "file_id=$FILE_ID" >> $GITHUB_OUTPUT
+          echo "ID do arquivo: $FILE_ID"
+        else
+          echo "is_gdrive=false" >> $GITHUB_OUTPUT
+          echo "🔵 Detectado: URL normal"
+        fi
+
+    - name: Download from Google Drive
+      id: download_gdrive
+      if: steps.detect_url.outputs.is_gdrive == 'true'
+      run: |
+        echo "📥 Baixando do Google Drive..."
+        pip install gdown
+        
+        if [ -n "${{ github.event.inputs.output_filename }}" ] && [ "${{ github.event.inputs.output_filename }}" != "" ]; then
+          FILENAME="${{ github.event.inputs.output_filename }}"
+          gdown "https://drive.google.com/uc?id=${{ steps.detect_url.outputs.file_id }}" -O "$FILENAME"
+        else
+          gdown "https://drive.google.com/uc?id=${{ steps.detect_url.outputs.file_id }}"
+          FILENAME=$(ls -1t | grep -v '\.py$' | head -1)
+        fi
+        
+        # Se falhou, tentar método alternativo
+        if [ ! -f "$FILENAME" ]; then
+          echo "⚠️ Tentando método alternativo com wget..."
+          TEMP_FILE="download.tmp"
+          wget --no-check-certificate \
+            "https://docs.google.com/uc?export=download&id=${{ steps.detect_url.outputs.file_id }}&confirm=t" \
+            -O "$TEMP_FILE"
+          
+          if [ -n "${{ github.event.inputs.output_filename }}" ] && [ "${{ github.event.inputs.output_filename }}" != "" ]; then
+            mv "$TEMP_FILE" "${{ github.event.inputs.output_filename }}"
+            FILENAME="${{ github.event.inputs.output_filename }}"
+          else
+            FILENAME="$TEMP_FILE"
+          fi
+        fi
+        
+        echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+        echo "✅ Download concluído: $FILENAME"
+
+    - name: Download normal URL
+      id: download_normal
+      if: steps.detect_url.outputs.is_gdrive == 'false'
+      run: |
+        echo "📥 Baixando URL normal..."
+        sudo apt-get update && sudo apt-get install -y wget
+        
+        if [ -n "${{ github.event.inputs.output_filename }}" ] && [ "${{ github.event.inputs.output_filename }}" != "" ]; then
+          FILENAME="${{ github.event.inputs.output_filename }}"
+          wget -O "$FILENAME" "${{ github.event.inputs.download_url }}"
+        else
+          wget --content-disposition "${{ github.event.inputs.download_url }}"
+          FILENAME=$(ls -1t | grep -v '\.py$' | head -1)
+        fi
+        
+        echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+        echo "✅ Download concluído: $FILENAME"
+
+    - name: Prepare file for release
+      id: prepare
+      run: |
+        if [ "${{ steps.detect_url.outputs.is_gdrive }}" = "true" ]; then
+          FILENAME="${{ steps.download_gdrive.outputs.filename }}"
+        else
+          FILENAME="${{ steps.download_normal.outputs.filename }}"
+        fi
+        
+        # Verificar se arquivo existe
+        if [ ! -f "$FILENAME" ]; then
+          echo "❌ ERRO: Arquivo não encontrado!"
+          ls -la
+          exit 1
+        fi
+        
+        # Criar nome seguro (sem caracteres especiais)
+        SAFE_FILENAME=$(echo "$FILENAME" | sed 's/[][(){}<>]//g')
+        
+        # Se nome mudou, renomear
+        if [ "$FILENAME" != "$SAFE_FILENAME" ]; then
+          echo "⚠️ Renomeando para nome seguro: $SAFE_FILENAME"
+          mv "$FILENAME" "$SAFE_FILENAME"
+          FILENAME="$SAFE_FILENAME"
+        fi
+        
+        # Obter informações
+        FILESIZE=$(stat -c%s "$FILENAME")
+        FILESIZE_MB=$(echo "scale=2; $FILESIZE / 1024 / 1024" | bc)
+        
+        echo "📊 Arquivo: $FILENAME"
+        echo "📏 Tamanho: $FILESIZE bytes ($FILESIZE_MB MB)"
+        
+        echo "final_filename=$FILENAME" >> $GITHUB_OUTPUT
+        echo "file_size=$FILESIZE" >> $GITHUB_OUTPUT
+        echo "file_size_mb=$FILESIZE_MB" >> $GITHUB_OUTPUT
+
+    - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: "teste-$(date +%s)"
-        name: "Teste Release"
-        body: "Teste de criação de release"
-        files: teste.txt
+        tag_name: ${{ steps.tag.outputs.tag_name }}
+        name: "Download: ${{ steps.prepare.outputs.final_filename }}"
+        body: |
+          ## 📥 Download Automático
+          
+          **Arquivo:** `${{ steps.prepare.outputs.final_filename }}`
+          
+          **Origem:** ${{ github.event.inputs.download_url }}
+          
+          **Tamanho:** ${{ steps.prepare.outputs.file_size_mb }} MB (${{ steps.prepare.outputs.file_size }} bytes)
+          
+          **Data:** $(date '+%d/%m/%Y %H:%M:%S')
+          
+          **Tag:** ${{ steps.tag.outputs.tag_name }}
+          
+          ---
+          
+          Baixado via GitHub Actions.
+        draft: false
+        prerelease: false
+        files: |
+          ${{ steps.prepare.outputs.final_filename }}
+
+    - name: Show success message
+      run: |
+        echo "✅✅✅ DOWNLOAD CONCLUÍDO COM SUCESSO! ✅✅✅"
+        echo ""
+        echo "📦 ARQUIVO: ${{ steps.prepare.outputs.final_filename }}"
+        echo "📏 TAMANHO: ${{ steps.prepare.outputs.file_size_mb }} MB"
+        echo "🔗 FONTE: ${{ github.event.inputs.download_url }}"
+        echo "🏷️  TAG: ${{ steps.tag.outputs.tag_name }}"
+        echo ""
+        echo "✅ O arquivo está disponível na seção Releases deste repositório!"
