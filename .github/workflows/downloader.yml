@@ -1,0 +1,195 @@
+name: Download and Release Manager
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_url:
+        description: 'URL para download'
+        required: true
+        type: string
+      release_prefix:
+        description: 'Prefixo da release (ex: v1.0)'
+        required: false
+        type: string
+        default: 'downloaded'
+      use_timestamp_release:
+        description: 'Usar timestamp na release?'
+        required: false
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+      asset_name:
+        description: 'Nome personalizado do arquivo (deixe vazio para auto)'
+        required: false
+        type: string
+        default: ''
+      aria2_options:
+        description: 'Opções do aria2c'
+        required: false
+        type: string
+        default: '--max-connection-per-server=16 --split=16 --continue=true --max-tries=0'
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install aria2 and necessary tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y aria2 curl wget file
+
+    - name: Generate release tag
+      id: generate_tag
+      run: |
+        if [ "${{ inputs.use_timestamp_release }}" = "true" ]; then
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          RELEASE_TAG="${{ inputs.release_prefix }}-$TIMESTAMP"
+        else
+          # Contar releases existentes com o prefixo
+          COUNT=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases" \
+            | grep -o "\"tag_name\":\s*\"${{ inputs.release_prefix }}-[0-9]+\"" \
+            | wc -l)
+          COUNT=$((COUNT + 1))
+          RELEASE_TAG="${{ inputs.release_prefix }}-$COUNT"
+        fi
+        echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+        echo "Generated release tag: $RELEASE_TAG"
+
+    - name: Setup temporary filename
+      id: setup_filename
+      run: |
+        # Nome temporário único
+        TEMP_FILENAME="download_$(date +%s)_$RANDOM"
+        echo "temp_filename=$TEMP_FILENAME" >> $GITHUB_OUTPUT
+        echo "Temporary filename: $TEMP_FILENAME"
+
+    - name: Download file with aria2
+      id: download_file
+      run: |
+        echo "📥 Iniciando download..."
+        echo "URL: ${{ inputs.download_url }}"
+        echo "Opções aria2c: ${{ inputs.aria2_options }}"
+        
+        # Baixar com nome temporário
+        aria2c ${{ inputs.aria2_options }} \
+          -o "${{ steps.setup_filename.outputs.temp_filename }}" \
+          --auto-file-renaming=false \
+          "${{ inputs.download_url }}"
+        
+        # Verificar se o download foi bem-sucedido
+        if [ ! -f "${{ steps.setup_filename.outputs.temp_filename }}" ]; then
+          echo "❌ Erro: Download falhou!"
+          exit 1
+        fi
+        
+        # Obter o nome REAL do arquivo (o que o aria2 salvou)
+        REAL_FILE=$(ls -1 | grep "^${{ steps.setup_filename.outputs.temp_filename }}" | head -1)
+        
+        if [ -z "$REAL_FILE" ]; then
+          echo "⚠️  Não encontrou arquivo com o padrão, procurando qualquer arquivo recente..."
+          REAL_FILE=$(find . -maxdepth 1 -type f -newer /proc -printf "%f\n" | head -1)
+        fi
+        
+        if [ -z "$REAL_FILE" ]; then
+          REAL_FILE="${{ steps.setup_filename.outputs.temp_filename }}"
+        fi
+        
+        echo "📄 Arquivo baixado: $REAL_FILE"
+        
+        # Se o usuário especificou um nome, renomear
+        if [ -n "${{ inputs.asset_name }}" ] && [ "${{ inputs.asset_name }}" != "" ]; then
+          mv "$REAL_FILE" "${{ inputs.asset_name }}"
+          FINAL_FILENAME="${{ inputs.asset_name }}"
+        else
+          FINAL_FILENAME="$REAL_FILE"
+        fi
+        
+        echo "🏷️  Nome final: $FINAL_FILENAME"
+        
+        # Informações do arquivo
+        echo "📊 Tamanho: $(ls -lh "$FINAL_FILENAME" | awk '{print $5}')"
+        echo "📝 Tipo: $(file -b "$FINAL_FILENAME" | cut -c1-50)"
+        
+        # Salvar para uso posterior
+        echo "final_filename=$FINAL_FILENAME" >> $GITHUB_OUTPUT
+        echo "file_size=$(stat -c%s "$FINAL_FILENAME")" >> $GITHUB_OUTPUT
+
+    - name: Clean problematic filenames
+      id: clean_filename
+      run: |
+        CURRENT_FILE="${{ steps.download_file.outputs.final_filename }}"
+        
+        # Remover caracteres problemáticos
+        CLEAN_FILE=$(echo "$CURRENT_FILE" | sed \
+          -e 's/[?&=\/]/_/g' \
+          -e 's/%20/_/g' \
+          -e 's/+/_/g' \
+          -e 's/ /_/g' \
+          -e 's/\[/_/g' \
+          -e 's/\]/_/g' \
+          -e 's/{/_/g' \
+          -e 's/}/_/g' \
+          -e 's/(/_/g' \
+          -e 's/)/_/g')
+        
+        # Se o nome mudou, renomear
+        if [ "$CURRENT_FILE" != "$CLEAN_FILE" ]; then
+          mv "$CURRENT_FILE" "$CLEAN_FILE"
+          echo "✅ Nome limpo: $CLEAN_FILE"
+        else
+          echo "✅ Nome já está limpo: $CLEAN_FILE"
+        fi
+        
+        echo "cleaned_filename=$CLEAN_FILE" >> $GITHUB_OUTPUT
+
+    - name: Create Release with downloaded file
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.generate_tag.outputs.release_tag }}
+        name: "Release ${{ steps.generate_tag.outputs.release_tag }}"
+        body: |
+          ## 📥 Download Automático
+          
+          **URL Original:** ${{ inputs.download_url }}
+          
+          **Arquivo:** ${{ steps.clean_filename.outputs.cleaned_filename }}
+          
+          **Tamanho:** ${{ steps.download_file.outputs.file_size }} bytes
+          
+          **Data:** $(date +'%Y-%m-%d %H:%M:%S')
+          
+          **Download via:** aria2c
+          
+          ---
+          
+          Gerado automaticamente pelo GitHub Actions.
+        draft: false
+        prerelease: false
+        files: ${{ steps.clean_filename.outputs.cleaned_filename }}
+
+    - name: Upload as workflow artifact (backup)
+      uses: actions/upload-artifact@v4
+      with:
+        name: downloaded-files
+        path: ${{ steps.clean_filename.outputs.cleaned_filename }}
+        retention-days: 1
+
+    - name: Summary
+      run: |
+        echo "🎉 Processo concluído com sucesso!"
+        echo "===================================="
+        echo "📦 Arquivo: ${{ steps.clean_filename.outputs.cleaned_filename }}"
+        echo "🏷️  Release: ${{ steps.generate_tag.outputs.release_tag }}"
+        echo "💾 Tamanho: ${{ steps.download_file.outputs.file_size }} bytes"
+        echo "🔗 URL original: ${{ inputs.download_url }}"
+        echo "===================================="
