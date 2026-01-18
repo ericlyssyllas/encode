@@ -1,4 +1,4 @@
-name: Universal Download with Google Drive Support
+name: Universal Downloader
 
 on:
   workflow_dispatch:
