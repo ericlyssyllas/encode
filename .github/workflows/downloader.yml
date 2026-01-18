@@ -1,211 +1,32 @@
-name: Universal Download with Google Drive Support V2
+name: Teste Download Simples
 
 on:
   workflow_dispatch:
     inputs:
       download_url:
-        description: 'URL para download (Google Drive ou qualquer outra)'
+        description: 'URL para download'
         required: true
         type: string
-      output_filename:
-        description: 'Nome personalizado (opcional - deixe vazio para nome original)'
-        required: false
-        type: string
-        default: ''
+
+permissions:
+  contents: write
 
 jobs:
-  download:
+  test:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Detect URL type
-      id: detect_url
+    - uses: actions/checkout@v4
+    
+    - name: Criar arquivo de teste
       run: |
-        URL="${{ github.event.inputs.download_url }}"
-        
-        if echo "$URL" | grep -qi "drive.google.com\|docs.google.com"; then
-          echo "is_gdrive=true" >> $GITHUB_OUTPUT
-          echo "🔵 Detectado: Google Drive"
-          
-          # Extrair ID do arquivo
-          if echo "$URL" | grep -q "/d/"; then
-            FILE_ID=$(echo "$URL" | sed 's|.*/d/\([a-zA-Z0-9_-]*\).*|\1|')
-          elif echo "$URL" | grep -q "id="; then
-            FILE_ID=$(echo "$URL" | sed 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/')
-          else
-            FILE_ID=$(echo "$URL" | sed 's|.*/file/d/\([a-zA-Z0-9_-]*\)/.*|\1|')
-          fi
-          
-          # Limpar ID de parâmetros extras
-          FILE_ID=$(echo "$FILE_ID" | cut -d'/' -f1 | cut -d'?' -f1)
-          
-          echo "file_id=$FILE_ID" >> $GITHUB_OUTPUT
-          echo "ID do arquivo: $FILE_ID"
-        else
-          echo "is_gdrive=false" >> $GITHUB_OUTPUT
-          echo "🔵 Detectado: URL normal"
-        fi
-
-    - name: Download from Google Drive (se for Google)
-      id: download_gdrive
-      if: steps.detect_url.outputs.is_gdrive == 'true'
-      run: |
-        echo "📥 Baixando do Google Drive..."
-        
-        # Instalar gdown
-        pip install gdown
-        
-        # Definir nome do arquivo
-        if [ -n "${{ github.event.inputs.output_filename }}" ] && [ "${{ github.event.inputs.output_filename }}" != "" ]; then
-          OUTPUT_NAME="${{ github.event.inputs.output_filename }}"
-          echo "Usando nome personalizado: $OUTPUT_NAME"
-        else
-          OUTPUT_NAME=""
-        fi
-        
-        # Tentar baixar com gdown
-        if [ -n "$OUTPUT_NAME" ]; then
-          gdown "https://drive.google.com/uc?id=${{ steps.detect_url.outputs.file_id }}" -O "$OUTPUT_NAME" || FAILED=true
-          FILENAME="$OUTPUT_NAME"
-        else
-          gdown "https://drive.google.com/uc?id=${{ steps.detect_url.outputs.file_id }}" || FAILED=true
-          # Pegar o nome do arquivo baixado (mais recente)
-          FILENAME=$(ls -1t | grep -v '\.py$' | head -1)
-        fi
-        
-        # Se falhou, tentar método alternativo
-        if [ ! -f "$FILENAME" ] || [ "$FAILED" = "true" ]; then
-          echo "⚠️ Tentando método alternativo..."
-          
-          # Criar nome temporário
-          TEMP_FILE="gdrive_download.tmp"
-          
-          # Baixar com wget
-          wget --no-check-certificate \
-            "https://docs.google.com/uc?export=download&id=${{ steps.detect_url.outputs.file_id }}&confirm=t" \
-            -O "$TEMP_FILE"
-          
-          # Se tinha nome personalizado, renomear
-          if [ -n "$OUTPUT_NAME" ]; then
-            mv "$TEMP_FILE" "$OUTPUT_NAME"
-            FILENAME="$OUTPUT_NAME"
-          else
-            # Tentar extrair nome real do arquivo
-            FILENAME="$TEMP_FILE"
-          fi
-        fi
-        
-        # Validar download
-        if [ ! -f "$FILENAME" ]; then
-          echo "❌ ERRO: Falha completa no download do Google Drive"
-          exit 1
-        fi
-        
-        echo "filename=$FILENAME" >> $GITHUB_OUTPUT
-        echo "✅ Download concluído: $FILENAME"
-
-    - name: Install aria2 for normal URLs
-      if: steps.detect_url.outputs.is_gdrive == 'false'
-      run: sudo apt-get update && sudo apt-get install -y aria2
-
-    - name: Download with aria2 (para URLs normais)
-      id: download_normal
-      if: steps.detect_url.outputs.is_gdrive == 'false'
-      run: |
-        echo "📥 Baixando com aria2c..."
-        
-        # Baixar SEM especificar nome para preservar nome original
-        aria2c \
-          --continue=true \
-          --max-tries=0 \
-          --max-connection-per-server=16 \
-          --split=16 \
-          "${{ github.event.inputs.download_url }}"
-        
-        # Encontrar o arquivo mais recentemente modificado (excluir arquivos de log)
-        FILENAME=$(find . -maxdepth 1 -type f ! -name "*.log" ! -name "*.txt" ! -name "*.aria2" -printf "%T@ %f\n" | sort -nr | head -1 | cut -d' ' -f2-)
-        
-        # Se especificou nome personalizado, renomear
-        if [ -n "${{ github.event.inputs.output_filename }}" ] && [ "${{ github.event.inputs.output_filename }}" != "" ]; then
-          mv "$FILENAME" "${{ github.event.inputs.output_filename }}"
-          FILENAME="${{ github.event.inputs.output_filename }}"
-        fi
-        
-        echo "filename=$FILENAME" >> $GITHUB_OUTPUT
-        echo "✅ Download concluído: $FILENAME"
-
-    - name: Determine downloaded file
-      id: final_file
-      run: |
-        if [ "${{ steps.detect_url.outputs.is_gdrive }}" = "true" ]; then
-          FILENAME="${{ steps.download_gdrive.outputs.filename }}"
-        else
-          FILENAME="${{ steps.download_normal.outputs.filename }}"
-        fi
-        
-        # Verificar se o arquivo existe
-        if [ ! -f "$FILENAME" ]; then
-          echo "❌ ERRO: Arquivo não encontrado: $FILENAME"
-          echo "📁 Conteúdo da pasta:"
-          ls -la
-          exit 1
-        fi
-        
-        # Criar um nome seguro para o arquivo (sem colchetes)
-        SAFE_FILENAME=$(echo "$FILENAME" | sed 's/[][]//g')
-        
-        # Se o nome mudou, renomear o arquivo
-        if [ "$FILENAME" != "$SAFE_FILENAME" ]; then
-          echo "⚠️ Renomeando arquivo para nome seguro: $SAFE_FILENAME"
-          mv "$FILENAME" "$SAFE_FILENAME"
-          FILENAME="$SAFE_FILENAME"
-        fi
-        
-        # Calcular tamanho
-        FILESIZE=$(stat -c%s "$FILENAME")
-        
-        echo "📊 Informações do arquivo:"
-        echo "Nome: $FILENAME"
-        echo "Tamanho: $FILESIZE bytes"
-        echo "Tipo: $(file -b "$FILENAME" | cut -c1-100)"
-        
-        echo "final_filename=$FILENAME" >> $GITHUB_OUTPUT
-        echo "file_size=$FILESIZE" >> $GITHUB_OUTPUT
-
-    - name: Create GitHub Release
-      uses: ncipollo/release-action@v1
+        echo "Arquivo de teste gerado em $(date)" > teste.txt
+        echo "Origem: ${{ github.event.inputs.download_url }}" >> teste.txt
+    
+    - name: Criar Release
+      uses: softprops/action-gh-release@v1
       with:
-        tag: "dl-$(date +%Y%m%d-%H%M%S)"
-        name: "Download: ${{ steps.final_file.outputs.final_filename }}"
-        body: |
-          ## 📥 Download Automático
-          
-          **Arquivo:** `${{ steps.final_file.outputs.final_filename }}`
-          
-          **Origem:** ${{ github.event.inputs.download_url }}
-          
-          **Tamanho:** ${{ steps.final_file.outputs.file_size }} bytes
-          
-          **Data:** $(date '+%d/%m/%Y %H:%M:%S')
-          
-          ---
-          
-          Baixado via GitHub Actions.
-        draft: false
-        prerelease: false
-        artifacts: "${{ steps.final_file.outputs.final_filename }}"
-        token: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Show result
-      run: |
-        echo "✅✅✅ DOWNLOAD CONCLUÍDO COM SUCESSO! ✅✅✅"
-        echo ""
-        echo "📦 ARQUIVO: ${{ steps.final_file.outputs.final_filename }}"
-        echo "📏 TAMANHO: ${{ steps.final_file.outputs.file_size }} bytes"
-        echo "🔗 FONTE: ${{ github.event.inputs.download_url }}"
-        echo "🏷️  TAG: dl-$(date +%Y%m%d-%H%M%S)"
-        echo ""
-        echo "✅ O arquivo está disponível na seção Releases deste repositório!"
+        tag_name: "teste-$(date +%s)"
+        name: "Teste Release"
+        body: "Teste de criação de release"
+        files: teste.txt
