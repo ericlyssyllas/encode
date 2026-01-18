@@ -1,151 +1,62 @@
-name: Download and Release - Preserve Original Filename
+name: Simple Download and Release
 
 on:
   workflow_dispatch:
     inputs:
       download_url:
-        description: 'URL para download'
+        description: 'URL do arquivo para download'
         required: true
         type: string
-      release_name:
-        description: 'Nome da release (opcional)'
-        required: false
-        type: string
-        default: 'Downloaded File'
       aria2_options:
-        description: 'Opções do aria2c (recomendado para Google Drive: --header="Cookie: ...")'
+        description: 'Opções do aria2c'
         required: false
         type: string
-        default: '-x 16 -s 16 -k 1M --continue=true --max-tries=0'
-
-env:
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        default: '--continue=true --max-tries=0'
 
 jobs:
-  download-and-release:
+  simple-download:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - name: Setup
+      run: sudo apt-get update && sudo apt-get install -y aria2
 
-    - name: Install aria2
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y aria2
-
-    - name: Download file with aria2 (let it choose the filename)
+    - name: Download with aria2 (preserve original name)
       id: download
       run: |
-        echo "📥 Iniciando download com aria2c..."
-        echo "URL: ${{ inputs.download_url }}"
+        echo "Baixando: ${{ inputs.download_url }}"
         
-        # Primeiro, vejamos qual nome o aria2c vai usar
-        echo "🔍 Verificando informações do arquivo..."
+        # Baixar SEM especificar nome de saída
+        # O aria2c usará o nome do servidor
+        aria2c ${{ inputs.aria2_options }} "${{ inputs.download_url }}"
         
-        # Baixar SEM especificar nome - deixe o aria2c decidir
-        aria2c ${{ inputs.aria2_options }} \
-          --dry-run \
-          --summary-interval=0 \
-          "${{ inputs.download_url }}" 2>&1 | grep "Download complete:" || true
-        
-        echo "🚀 Iniciando download real..."
-        
-        # AGORA o download real - SEM o parâmetro -o
-        aria2c ${{ inputs.aria2_options }} \
-          --summary-interval=0 \
-          "${{ inputs.download_url }}"
-        
-        # Procurar o arquivo mais recente baixado
-        echo "🔍 Procurando arquivo baixado..."
-        
-        # Listar arquivos na pasta atual
-        echo "📁 Conteúdo da pasta:"
+        # Encontrar qual arquivo foi baixado
+        # O aria2c geralmente mantém o nome original
+        echo "Arquivos na pasta:"
         ls -la
         
-        # O aria2c geralmente mantém o nome original
-        # Vamos pegar o arquivo mais recente (excluindo diretórios)
-        DOWNLOADED_FILE=$(find . -maxdepth 1 -type f -printf "%T@ %f\n" | sort -nr | head -1 | cut -d' ' -f2-)
+        # Pegar o arquivo mais recente (provavelmente o que acabou de baixar)
+        FILENAME=$(ls -1t | head -1)
         
-        if [ -z "$DOWNLOADED_FILE" ]; then
-          # Tentar outra abordagem: arquivos modificados recentemente
-          DOWNLOADED_FILE=$(ls -1t | head -1)
+        # Verificar se é um arquivo (não diretório)
+        if [ ! -f "$FILENAME" ]; then
+          # Tentar encontrar qualquer arquivo
+          FILENAME=$(find . -maxdepth 1 -type f -printf "%f\n" | head -1)
         fi
         
-        if [ -z "$DOWNLOADED_FILE" ]; then
-          echo "❌ ERRO: Não consegui encontrar o arquivo baixado!"
-          echo "📁 Lista de arquivos:"
-          ls -la
+        if [ -z "$FILENAME" ] || [ ! -f "$FILENAME" ]; then
+          echo "ERRO: Nenhum arquivo encontrado após download!"
           exit 1
         fi
         
-        echo "✅ Arquivo encontrado: $DOWNLOADED_FILE"
-        echo "📊 Tamanho: $(ls -lh "$DOWNLOADED_FILE" | awk '{print $5}')"
-        echo "📝 Tipo: $(file -b "$DOWNLOADED_FILE")"
-        
-        # Salvar o nome EXATO do arquivo
-        echo "original_filename=$DOWNLOADED_FILE" >> $GITHUB_OUTPUT
-        echo "file_size=$(stat -c%s "$DOWNLOADED_FILE")" >> $GITHUB_OUTPUT
+        echo "Arquivo baixado: $FILENAME"
+        echo "Tamanho: $(ls -lh "$FILENAME")"
+        echo "filename=$FILENAME" >> $GITHUB_OUTPUT
 
-    - name: Generate release tag from filename
-      id: generate_tag
-      run: |
-        # Usar o nome do arquivo (sem extensão) para a tag
-        FILENAME="${{ steps.download.outputs.original_filename }}"
-        
-        # Remover extensão para criar tag
-        BASENAME=$(basename "$FILENAME")
-        NAME_WITHOUT_EXT="${BASENAME%.*}"
-        
-        if [ "$NAME_WITHOUT_EXT" = "$BASENAME" ]; then
-          # Se não tem extensão
-          NAME_WITHOUT_EXT="$BASENAME"
-        fi
-        
-        # Criar tag segura (sem caracteres especiais)
-        SAFE_TAG=$(echo "$NAME_WITHOUT_EXT" | tr ' ' '_' | tr '.' '_' | tr -cd '[:alnum:]_-' | head -c 50)
-        
-        # Adicionar timestamp para evitar duplicatas
-        TIMESTAMP=$(date +%Y%m%d)
-        RELEASE_TAG="${SAFE_TAG}-${TIMESTAMP}"
-        
-        echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
-        echo "🏷️ Tag da release: $RELEASE_TAG"
-
-    - name: Create Release with original file
+    - name: Create release with auto tag
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: ${{ steps.generate_tag.outputs.release_tag }}
-        name: "${{ inputs.release_name != '' && inputs.release_name || steps.download.outputs.original_filename }}"
-        body: |
-          ## 📥 Download Automático
-          
-          **Arquivo Original:** ${{ steps.download.outputs.original_filename }}
-          
-          **URL:** ${{ inputs.download_url }}
-          
-          **Tamanho:** ${{ steps.download.outputs.file_size }} bytes
-          
-          **Data:** $(date +'%d/%m/%Y %H:%M:%S')
-          
-          ---
-          
-          Baixado automaticamente via aria2c.
-          
-          Nome preservado exatamente como fornecido pelo servidor.
-        draft: false
-        prerelease: false
-        generate_release_notes: false
-        files: ${{ steps.download.outputs.original_filename }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Show summary
-      run: |
-        echo "✅ DOWNLOAD CONCLUÍDO!"
-        echo "========================"
-        echo "📄 Arquivo: ${{ steps.download.outputs.original_filename }}"
-        echo "🏷️  Release: ${{ steps.generate_tag.outputs.release_tag }}"
-        echo "📦 Tamanho: ${{ steps.download.outputs.file_size }} bytes"
-        echo "🔗 Origem: ${{ inputs.download_url }}"
-        echo "========================"
+        tag_name: "file-$(date +%s)"
+        name: "Download: ${{ steps.download.outputs.filename }}"
+        body: "Baixado de: ${{ inputs.download_url }}"
+        files: ${{ steps.download.outputs.filename }}
