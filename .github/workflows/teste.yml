@@ -1,0 +1,31 @@
+name: Teste Release Simples
+
+on: workflow_dispatch
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Gerar tag
+      id: tag
+      run: |
+        TAG="teste-$(date +%Y%m%d-%H%M%S)"
+        echo "tag_name=$TAG" >> $GITHUB_OUTPUT
+        echo "Tag: $TAG"
+    
+    - name: Criar arquivo
+      run: echo "Teste $(date)" > teste.txt
+    
+    - name: Criar Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.tag.outputs.tag_name }}
+        name: "Teste Release"
+        body: "Teste de criação de release"
+        files: teste.txt
