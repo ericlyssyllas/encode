@@ -1,4 +1,4 @@
-name: Universal Download with Google Drive Support
+name: Universal Download with Google Drive Support V2
 
 on:
   workflow_dispatch:
@@ -126,7 +126,7 @@ jobs:
           "${{ github.event.inputs.download_url }}"
         
         # Encontrar o arquivo mais recentemente modificado (excluir arquivos de log)
-        FILENAME=$(find . -maxdepth 1 -type f ! -name "*.log" ! -name "*.txt" -printf "%T@ %f\n" | sort -nr | head -1 | cut -d' ' -f2-)
+        FILENAME=$(find . -maxdepth 1 -type f ! -name "*.log" ! -name "*.txt" ! -name "*.aria2" -printf "%T@ %f\n" | sort -nr | head -1 | cut -d' ' -f2-)
         
         # Se especificou nome personalizado, renomear
         if [ -n "${{ github.event.inputs.output_filename }}" ] && [ "${{ github.event.inputs.output_filename }}" != "" ]; then
@@ -154,6 +154,16 @@ jobs:
           exit 1
         fi
         
+        # Criar um nome seguro para o arquivo (sem colchetes)
+        SAFE_FILENAME=$(echo "$FILENAME" | sed 's/[][]//g')
+        
+        # Se o nome mudou, renomear o arquivo
+        if [ "$FILENAME" != "$SAFE_FILENAME" ]; then
+          echo "⚠️ Renomeando arquivo para nome seguro: $SAFE_FILENAME"
+          mv "$FILENAME" "$SAFE_FILENAME"
+          FILENAME="$SAFE_FILENAME"
+        fi
+        
         # Calcular tamanho
         FILESIZE=$(stat -c%s "$FILENAME")
         
@@ -166,9 +176,9 @@ jobs:
         echo "file_size=$FILESIZE" >> $GITHUB_OUTPUT
 
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v1
+      uses: ncipollo/release-action@v1
       with:
-        tag_name: "dl-$(date +%Y%m%d-%H%M%S)"
+        tag: "dl-$(date +%Y%m%d-%H%M%S)"
         name: "Download: ${{ steps.final_file.outputs.final_filename }}"
         body: |
           ## 📥 Download Automático
@@ -186,8 +196,8 @@ jobs:
           Baixado via GitHub Actions.
         draft: false
         prerelease: false
-        files: |
-          ${{ steps.final_file.outputs.final_filename }}
+        artifacts: "${{ steps.final_file.outputs.final_filename }}"
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Show result
       run: |
