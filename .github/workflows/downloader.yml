@@ -13,9 +13,6 @@ on:
         type: string
         default: ''
 
-env:
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
 jobs:
   download:
     runs-on: ubuntu-latest
@@ -27,7 +24,7 @@ jobs:
     - name: Detect URL type
       id: detect_url
       run: |
-        URL="${{ inputs.download_url }}"
+        URL="${{ github.event.inputs.download_url }}"
         
         if echo "$URL" | grep -qi "drive.google.com\|docs.google.com"; then
           echo "is_gdrive=true" >> $GITHUB_OUTPUT
@@ -38,7 +35,12 @@ jobs:
             FILE_ID=$(echo "$URL" | sed 's|.*/d/\([a-zA-Z0-9_-]*\).*|\1|')
           elif echo "$URL" | grep -q "id="; then
             FILE_ID=$(echo "$URL" | sed 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/')
+          else
+            FILE_ID=$(echo "$URL" | sed 's|.*/file/d/\([a-zA-Z0-9_-]*\)/.*|\1|')
           fi
+          
+          # Limpar ID de parâmetros extras
+          FILE_ID=$(echo "$FILE_ID" | cut -d'/' -f1 | cut -d'?' -f1)
           
           echo "file_id=$FILE_ID" >> $GITHUB_OUTPUT
           echo "ID do arquivo: $FILE_ID"
@@ -56,30 +58,54 @@ jobs:
         # Instalar gdown
         pip install gdown
         
-        # Baixar com gdown
-        if [ -n "${{ inputs.output_filename }}" ] && [ "${{ inputs.output_filename }}" != "" ]; then
-          echo "Usando nome personalizado: ${{ inputs.output_filename }}"
-          gdown "https://drive.google.com/uc?id=${{ steps.detect_url.outputs.file_id }}" -O "${{ inputs.output_filename }}"
-          FILENAME="${{ inputs.output_filename }}"
+        # Definir nome do arquivo
+        if [ -n "${{ github.event.inputs.output_filename }}" ] && [ "${{ github.event.inputs.output_filename }}" != "" ]; then
+          OUTPUT_NAME="${{ github.event.inputs.output_filename }}"
+          echo "Usando nome personalizado: $OUTPUT_NAME"
         else
-          # gdown vai usar o nome original
-          gdown "https://drive.google.com/uc?id=${{ steps.detect_url.outputs.file_id }}"
-          # Pegar o nome do arquivo baixado
+          OUTPUT_NAME=""
+        fi
+        
+        # Tentar baixar com gdown
+        if [ -n "$OUTPUT_NAME" ]; then
+          gdown "https://drive.google.com/uc?id=${{ steps.detect_url.outputs.file_id }}" -O "$OUTPUT_NAME" || FAILED=true
+          FILENAME="$OUTPUT_NAME"
+        else
+          gdown "https://drive.google.com/uc?id=${{ steps.detect_url.outputs.file_id }}" || FAILED=true
+          # Pegar o nome do arquivo baixado (mais recente)
           FILENAME=$(ls -1t | grep -v '\.py$' | head -1)
         fi
         
-        if [ ! -f "$FILENAME" ]; then
-          echo "❌ Falha no download do Google Drive"
-          echo "Tentando método alternativo..."
+        # Se falhou, tentar método alternativo
+        if [ ! -f "$FILENAME" ] || [ "$FAILED" = "true" ]; then
+          echo "⚠️ Tentando método alternativo..."
           
-          # Método alternativo com wget
+          # Criar nome temporário
+          TEMP_FILE="gdrive_download.tmp"
+          
+          # Baixar com wget
           wget --no-check-certificate \
-            "https://drive.google.com/uc?export=download&id=${{ steps.detect_url.outputs.file_id }}&confirm=t" \
-            -O "$FILENAME" || true
+            "https://docs.google.com/uc?export=download&id=${{ steps.detect_url.outputs.file_id }}&confirm=t" \
+            -O "$TEMP_FILE"
+          
+          # Se tinha nome personalizado, renomear
+          if [ -n "$OUTPUT_NAME" ]; then
+            mv "$TEMP_FILE" "$OUTPUT_NAME"
+            FILENAME="$OUTPUT_NAME"
+          else
+            # Tentar extrair nome real do arquivo
+            FILENAME="$TEMP_FILE"
+          fi
         fi
         
-        echo "✅ Download concluído: $FILENAME"
+        # Validar download
+        if [ ! -f "$FILENAME" ]; then
+          echo "❌ ERRO: Falha completa no download do Google Drive"
+          exit 1
+        fi
+        
         echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+        echo "✅ Download concluído: $FILENAME"
 
     - name: Install aria2 for normal URLs
       if: steps.detect_url.outputs.is_gdrive == 'false'
@@ -97,19 +123,19 @@ jobs:
           --max-tries=0 \
           --max-connection-per-server=16 \
           --split=16 \
-          "${{ inputs.download_url }}"
+          "${{ github.event.inputs.download_url }}"
         
-        # Encontrar o arquivo mais recentemente modificado
-        FILENAME=$(find . -maxdepth 1 -type f -printf "%T@ %f\n" | sort -nr | head -1 | cut -d' ' -f2-)
+        # Encontrar o arquivo mais recentemente modificado (excluir arquivos de log)
+        FILENAME=$(find . -maxdepth 1 -type f ! -name "*.log" ! -name "*.txt" -printf "%T@ %f\n" | sort -nr | head -1 | cut -d' ' -f2-)
         
         # Se especificou nome personalizado, renomear
-        if [ -n "${{ inputs.output_filename }}" ] && [ "${{ inputs.output_filename }}" != "" ]; then
-          mv "$FILENAME" "${{ inputs.output_filename }}"
-          FILENAME="${{ inputs.output_filename }}"
+        if [ -n "${{ github.event.inputs.output_filename }}" ] && [ "${{ github.event.inputs.output_filename }}" != "" ]; then
+          mv "$FILENAME" "${{ github.event.inputs.output_filename }}"
+          FILENAME="${{ github.event.inputs.output_filename }}"
         fi
         
-        echo "✅ Download concluído: $FILENAME"
         echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+        echo "✅ Download concluído: $FILENAME"
 
     - name: Determine downloaded file
       id: final_file
@@ -128,26 +154,28 @@ jobs:
           exit 1
         fi
         
+        # Calcular tamanho
+        FILESIZE=$(stat -c%s "$FILENAME")
+        
         echo "📊 Informações do arquivo:"
         echo "Nome: $FILENAME"
-        echo "Tamanho: $(ls -lh "$FILENAME" | awk '{print $5}')"
+        echo "Tamanho: $FILESIZE bytes"
         echo "Tipo: $(file -b "$FILENAME" | cut -c1-100)"
         
         echo "final_filename=$FILENAME" >> $GITHUB_OUTPUT
-        echo "file_size=$(stat -c%s "$FILENAME")" >> $GITHUB_OUTPUT
+        echo "file_size=$FILESIZE" >> $GITHUB_OUTPUT
 
     - name: Create GitHub Release
-      id: create_release
       uses: softprops/action-gh-release@v1
       with:
         tag_name: "dl-$(date +%Y%m%d-%H%M%S)"
-        name: "${{ steps.final_file.outputs.final_filename }}"
+        name: "Download: ${{ steps.final_file.outputs.final_filename }}"
         body: |
           ## 📥 Download Automático
           
           **Arquivo:** `${{ steps.final_file.outputs.final_filename }}`
           
-          **Origem:** ${{ inputs.download_url }}
+          **Origem:** ${{ github.event.inputs.download_url }}
           
           **Tamanho:** ${{ steps.final_file.outputs.file_size }} bytes
           
@@ -158,7 +186,8 @@ jobs:
           Baixado via GitHub Actions.
         draft: false
         prerelease: false
-        files: ${{ steps.final_file.outputs.final_filename }}
+        files: |
+          ${{ steps.final_file.outputs.final_filename }}
 
     - name: Show result
       run: |
@@ -166,7 +195,7 @@ jobs:
         echo ""
         echo "📦 ARQUIVO: ${{ steps.final_file.outputs.final_filename }}"
         echo "📏 TAMANHO: ${{ steps.final_file.outputs.file_size }} bytes"
-        echo "🔗 FONTE: ${{ inputs.download_url }}"
-        echo "🏷️  RELEASE: dl-$(date +%Y%m%d-%H%M%S)"
+        echo "🔗 FONTE: ${{ github.event.inputs.download_url }}"
+        echo "🏷️  TAG: dl-$(date +%Y%m%d-%H%M%S)"
         echo ""
         echo "✅ O arquivo está disponível na seção Releases deste repositório!"
